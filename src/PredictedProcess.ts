@@ -1,7 +1,9 @@
 import type { ChildProcess } from 'child_process';
+import { spawn } from 'child_process';
 
 export class PredictedProcess {
   private _childProcess: ChildProcess | null = null;
+  private _cache: Map<AbortSignal, Promise<void>> = new Map();
 
   public constructor(
     public readonly id: number,
@@ -33,9 +35,54 @@ export class PredictedProcess {
    * ```
    */
   public async run(signal?: AbortSignal): Promise<void> {
-    // TODO: Implement this.
-  }
+    if (signal?.aborted) {
+      throw new Error('Aborted before execution');
+    }
 
+    return new Promise((resolve, reject) => {
+      // prepare arguments for spawn
+      let [command, ...args] = this.command.split(' ');
+
+      // spawn the child process
+      this._childProcess = spawn(command, args);
+
+      let cleanup = () => {
+        this._childProcess?.removeAllListeners();
+        this._childProcess?.kill();
+      };
+
+      // handle events
+      this._childProcess?.on('error', (error) => {
+        reject(error);
+      });
+
+      this._childProcess?.on('exit', (code, signal) => {
+        if (code === 0) {
+          cleanup();
+          resolve();
+        } else {
+          reject(signal);
+        }
+      });
+
+      this._childProcess?.on('close', (code) => {
+        if (code === 0) {
+          cleanup();
+          resolve();
+        } else {
+          reject(new Error(`Process exited with code $ {code}`));
+        }
+      });
+
+      // handle abort signal
+      if (signal) {
+        signal.addEventListener('abort', () => {
+          cleanup();
+          reject(new Error('AbortSignal triggered'));
+        });
+      }
+    });
+  }
   /**
    * Returns a memoized version of `PredictedProcess`.
    *
@@ -65,7 +112,33 @@ export class PredictedProcess {
    * ```
    */
   public memoize(): PredictedProcess {
-    // TODO: Implement this.
-    return this;
+    // Create a new PredictedProcess instance with the same id and command.
+    let memoizedProcess = new PredictedProcess(this.id, this.command);
+
+    memoizedProcess.run = async (signal: AbortSignal): Promise<void> => {
+      // If the signal is already aborted, throw an error.
+      if (signal?.aborted) {
+        throw new Error('Signal already aborted');
+      }
+
+      // If the signal is already in the cache, return the cached promise.
+      if (this._cache.has(signal)) {
+        return this._cache.get(signal) as Promise<void>;
+      }
+
+      // Otherwise, run the process and store the promise in the cache.
+      let promise = this.run(signal);
+      this._cache.set(signal, promise);
+
+      // Delete the promise from the cache if it fails
+      promise.catch(() => {
+        this._cache.delete(signal);
+      });
+
+      // Return the promise
+      return promise;
+    };
+
+    return memoizedProcess;
   }
 }
